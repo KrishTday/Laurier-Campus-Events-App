@@ -1,0 +1,5 @@
+{
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "outputDirectory": "backend/web",
+  "installCommand": "echo 'install handled by buildCommand'"
+}

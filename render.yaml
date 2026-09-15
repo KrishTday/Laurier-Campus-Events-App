@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: laurier-campus-events-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/events
+    envVars:
+      - key: DB_PATH
+        value: data/events.db
+      - key: WEB_ROOT
+        value: web

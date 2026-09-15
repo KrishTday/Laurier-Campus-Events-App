@@ -1,0 +1,4 @@
+backend/out/
+backend/data/*.db
+frontend/node_modules/
+backend/web/js/

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Laurier Campus Events</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="brand-mark">LCE</span>
+        <div>
+          <h1>Laurier Campus Events</h1>
+          <p class="tagline">One place to track events and deadlines, instead of scattered emails.</p>
+        </div>
+      </div>
+      <button id="organizer-toggle" type="button" class="ghost-btn">Organizer mode</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="controls">
+      <input id="search-input" type="search" placeholder="Search events, locations, clubs..." aria-label="Search events" />
+      <select id="category-select" aria-label="Filter by category">
+        <option value="All">All categories</option>
+      </select>
+      <label class="checkbox-label">
+        <input id="tracked-only" type="checkbox" />
+        My tracked events
+      </label>
+      <button id="add-event-toggle" type="button" class="primary-btn">+ Add event</button>
+    </section>
+
+    <div id="status-message" class="status-message hidden"></div>
+
+    <section id="add-event-panel" class="add-event-panel hidden">
+      <h2>Add a new event</h2>
+      <form id="add-event-form">
+        <div class="form-grid">
+          <label>Title
+            <input name="title" required maxlength="120" />
+          </label>
+          <label>Category
+            <select name="category" required>
+              <option value="Orientation">Orientation</option>
+              <option value="Academic">Academic</option>
+              <option value="Career">Career</option>
+              <option value="Clubs">Clubs</option>
+              <option value="Sports">Sports</option>
+              <option value="Social">Social</option>
+            </select>
+          </label>
+          <label>Location
+            <input name="location" required maxlength="120" />
+          </label>
+          <label>Organizer
+            <input name="organizer" required maxlength="120" />
+          </label>
+          <label>Starts
+            <input name="eventStart" type="datetime-local" required />
+          </label>
+          <label>Ends
+            <input name="eventEnd" type="datetime-local" />
+          </label>
+          <label>RSVP deadline
+            <input name="rsvpDeadline" type="datetime-local" />
+          </label>
+        </div>
+        <label class="full-width">Description
+          <textarea name="description" rows="3" maxlength="500"></textarea>
+        </label>
+        <div class="form-actions">
+          <button type="submit" class="primary-btn">Create event</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="event-list" class="event-list"></section>
+    <div id="empty-state" class="empty-state hidden">
+      <p>No events match your filters yet. Try clearing the search or category.</p>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <p>Built for Wilfrid Laurier students &middot; Java + SQLite backend, TypeScript frontend</p>
+  </footer>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
