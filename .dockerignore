@@ -1,0 +1,5 @@
+backend/out/
+backend/data/*.db
+backend/web/js/
+frontend/node_modules/
+.git/
