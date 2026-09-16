@@ -1,6 +1,6 @@
 # Laurier Campus Events App
 
-A full-stack events tracker for Wilfrid Laurier students, built with Java, TypeScript, CSS, HTML, and SQLite. Surfaces campus events and RSVP deadlines in one place instead of scattered club emails.
+A full-stack events tracker for Wilfrid Laurier students, built with Java, TypeScript, CSS, HTML, and SQL. Surfaces campus events and RSVP deadlines in one place instead of scattered club emails.
 
 <img width="1050" height="1079" alt="Image" src="https://github.com/user-attachments/assets/e61d579b-4187-4141-9c2c-f38a71ae29b3" />
 
