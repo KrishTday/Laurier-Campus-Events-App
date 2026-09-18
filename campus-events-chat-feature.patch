@@ -1,0 +1,830 @@
+diff --git a/README.md b/README.md
+index 0edcf26..adc4ca7 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,7 @@ A full-stack events tracker for Wilfrid Laurier students. Surfaces campus events
+ - Docker
+ - Render (backend hosting)
+ - Vercel (frontend hosting)
++- Voyage AI (embeddings) + Claude API (generation) for the RAG chat feature
+ 
+ ## 🎉 Features
+ 
+@@ -23,6 +24,7 @@ Here's what you can do with the Laurier Campus Events App:
+ - **RSVP Countdowns**: See how much time is left before an RSVP deadline, with a red highlight once it's within 48 hours.
+ - **Track Events**: Save the events you care about to a "my tracked events" view, persisted per browser with no login needed.
+ - **Organizer Mode**: Add or remove events through the same REST API the UI uses, standing in for a real event-management workflow.
++- **Ask About Events**: A chat widget backed by a real RAG pipeline. Event text is embedded with Voyage AI and cached in SQLite, a student's question is embedded and ranked against those vectors by cosine similarity, and the top matches are handed to Claude as grounding context so answers stay tied to real events instead of the model guessing. Matched events show up as clickable chips that jump straight to them in the main list.
+ 
+ ## 🐢 The Process
+ 
+@@ -53,6 +55,21 @@ To run the project in your local environment, follow these steps:
+    ```
+ 4. Open `http://localhost:8080` in your browser to view the app. The database seeds itself with sample Laurier events on first run.
+ 
++## 🤖 Chat feature setup
++
++The "Ask about events" widget needs two API keys set as environment variables on the backend. Without them, the rest of the app works normally and the chat widget returns a friendly "not configured" message instead of erroring.
++
++1. Get a Voyage AI key at [voyageai.com](https://www.voyageai.com) (embeddings; free tier available).
++2. Get an Anthropic key at [console.anthropic.com](https://console.anthropic.com) (Claude API; used to generate answers).
++3. Set them before running locally:
++   ```
++   export VOYAGE_API_KEY=your_voyage_key
++   export ANTHROPIC_API_KEY=your_anthropic_key
++   ```
++4. On Render, add the same two keys in the service's Environment tab (they're already declared as secrets in `render.yaml`, so Render will prompt for them on deploy).
++
++Never commit these keys to the repo — they're read from the environment only.
++
+ ## 🎥 Video
+ 
+ https://github.com/user-attachments/assets/0ecb6068-598e-4e40-a5e8-b4bd082ecbf7
+diff --git a/backend/src/com/laurier/events/ChatService.java b/backend/src/com/laurier/events/ChatService.java
+new file mode 100644
+index 0000000..2739a72
+--- /dev/null
++++ b/backend/src/com/laurier/events/ChatService.java
+@@ -0,0 +1,195 @@
++package com.laurier.events;
++
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++
++/**
++ * Orchestrates the RAG pipeline behind /api/chat:
++ *
++ *   1. Embed every event's text via Voyage AI, caching each vector in SQLite
++ *      keyed by a hash of the event's text so it's only recomputed when the
++ *      event actually changes (see event_embeddings in Db.java).
++ *   2. Embed the student's question and rank events by cosine similarity.
++ *   3. Hand the top matches to Claude as grounding context and return its
++ *      answer plus which events it was based on, so the frontend can surface
++ *      them as clickable chips.
++ */
++public final class ChatService {
++
++    private static final int TOP_K = 5;
++
++    private final Db db;
++    private final EventRepository events;
++    private final EmbeddingClient embeddingClient;
++    private final ClaudeClient claudeClient;
++
++    public ChatService(Db db, EventRepository events, EmbeddingClient embeddingClient, ClaudeClient claudeClient) {
++        this.db = db;
++        this.events = events;
++        this.embeddingClient = embeddingClient;
++        this.claudeClient = claudeClient;
++    }
++
++    public boolean isConfigured() {
++        return embeddingClient.isConfigured() && claudeClient.isConfigured();
++    }
++
++    public Map<String, Object> answer(String question) throws Exception {
++        if (question == null || question.isBlank()) {
++            throw new IllegalArgumentException("Missing 'message'");
++        }
++        if (!isConfigured()) {
++            throw new IllegalStateException(
++                    "Chat isn't configured yet. Set VOYAGE_API_KEY and ANTHROPIC_API_KEY on the server.");
++        }
++
++        List<Map<String, Object>> all = events.findAll(null, null, null);
++        if (all.isEmpty()) {
++            return Map.of("answer", "There aren't any events in the system yet.", "events", List.of());
++        }
++
++        Map<Long, double[]> vectors = ensureEmbeddings(all);
++        double[] queryVector = embeddingClient.embed(List.of(question), "query").get(0);
++
++        Map<Long, Double> scores = new HashMap<>();
++        for (Map<String, Object> e : all) {
++            long id = idOf(e);
++            scores.put(id, cosineSimilarity(queryVector, vectors.get(id)));
++        }
++
++        List<Map<String, Object>> ranked = new ArrayList<>(all);
++        ranked.sort((a, b) -> Double.compare(scores.get(idOf(b)), scores.get(idOf(a))));
++        List<Map<String, Object>> top = ranked.subList(0, Math.min(TOP_K, ranked.size()));
++
++        String answerText = claudeClient.ask(question, buildContext(top));
++
++        List<Map<String, Object>> sources = new ArrayList<>();
++        for (Map<String, Object> e : top) {
++            sources.add(Map.of("id", e.get("id"), "title", e.get("title")));
++        }
++        return Map.of("answer", answerText, "events", sources);
++    }
++
++    // ---------- embedding cache ----------
++
++    private Map<Long, double[]> ensureEmbeddings(List<Map<String, Object>> all) throws Exception {
++        Map<Long, double[]> vectors = new HashMap<>();
++        Map<Long, String> hashes = new HashMap<>();
++        List<Map<String, Object>> missing = new ArrayList<>();
++
++        for (Map<String, Object> e : all) {
++            long id = idOf(e);
++            String hash = sha256(eventText(e));
++            hashes.put(id, hash);
++            Optional<double[]> cached = getCached(id, hash);
++            if (cached.isPresent()) {
++                vectors.put(id, cached.get());
++            } else {
++                missing.add(e);
++            }
++        }
++
++        if (!missing.isEmpty()) {
++            List<String> texts = missing.stream().map(ChatService::eventText).toList();
++            List<double[]> embedded = embeddingClient.embed(texts, "document");
++            for (int i = 0; i < missing.size(); i++) {
++                long id = idOf(missing.get(i));
++                double[] vec = embedded.get(i);
++                vectors.put(id, vec);
++                storeCached(id, hashes.get(id), vec);
++            }
++        }
++        return vectors;
++    }
++
++    private synchronized Optional<double[]> getCached(long eventId, String hash) throws SQLException {
++        try (PreparedStatement ps = db.conn.prepareStatement(
++                "SELECT embedding FROM event_embeddings WHERE event_id = ? AND text_hash = ?")) {
++            ps.setLong(1, eventId);
++            ps.setString(2, hash);
++            try (ResultSet rs = ps.executeQuery()) {
++                if (!rs.next()) return Optional.empty();
++                return Optional.of(parseVector(rs.getString(1)));
++            }
++        }
++    }
++
++    private synchronized void storeCached(long eventId, String hash, double[] vector) throws SQLException {
++        try (PreparedStatement ps = db.conn.prepareStatement(
++                "INSERT OR REPLACE INTO event_embeddings (event_id, text_hash, embedding) VALUES (?, ?, ?)")) {
++            ps.setLong(1, eventId);
++            ps.setString(2, hash);
++            ps.setString(3, writeVector(vector));
++            ps.executeUpdate();
++        }
++    }
++
++    // ---------- helpers ----------
++
++    private static long idOf(Map<String, Object> e) {
++        return ((Number) e.get("id")).longValue();
++    }
++
++    private static String eventText(Map<String, Object> e) {
++        StringBuilder sb = new StringBuilder();
++        sb.append(e.get("title")).append(". ").append(e.get("category")).append(". ");
++        sb.append(e.get("description")).append(" Location: ").append(e.get("location"));
++        sb.append(". Starts: ").append(e.get("eventStart"));
++        if (e.get("rsvpDeadline") != null) {
++            sb.append(". RSVP by: ").append(e.get("rsvpDeadline"));
++        }
++        return sb.toString();
++    }
++
++    private static String buildContext(List<Map<String, Object>> top) {
++        StringBuilder sb = new StringBuilder();
++        for (Map<String, Object> e : top) {
++            sb.append("- [id ").append(e.get("id")).append("] ").append(eventText(e)).append('\n');
++        }
++        return sb.toString();
++    }
++
++    private static double cosineSimilarity(double[] a, double[] b) {
++        if (a == null || b == null) return -1.0;
++        double dot = 0, na = 0, nb = 0;
++        for (int i = 0; i < a.length; i++) {
++            dot += a[i] * b[i];
++            na += a[i] * a[i];
++            nb += b[i] * b[i];
++        }
++        if (na == 0 || nb == 0) return 0;
++        return dot / (Math.sqrt(na) * Math.sqrt(nb));
++    }
++
++    private static String sha256(String text) throws Exception {
++        MessageDigest md = MessageDigest.getInstance("SHA-256");
++        byte[] hash = md.digest(text.getBytes(StandardCharsets.UTF_8));
++        StringBuilder sb = new StringBuilder(hash.length * 2);
++        for (byte b : hash) sb.append(String.format("%02x", b));
++        return sb.toString();
++    }
++
++    private static double[] parseVector(String s) {
++        String[] parts = s.split(",");
++        double[] v = new double[parts.length];
++        for (int i = 0; i < parts.length; i++) v[i] = Double.parseDouble(parts[i]);
++        return v;
++    }
++
++    private static String writeVector(double[] v) {
++        StringBuilder sb = new StringBuilder(v.length * 10);
++        for (int i = 0; i < v.length; i++) {
++            if (i > 0) sb.append(',');
++            sb.append(v[i]);
++        }
++        return sb.toString();
++    }
++}
+diff --git a/backend/src/com/laurier/events/ClaudeClient.java b/backend/src/com/laurier/events/ClaudeClient.java
+new file mode 100644
+index 0000000..9584286
+--- /dev/null
++++ b/backend/src/com/laurier/events/ClaudeClient.java
+@@ -0,0 +1,80 @@
++package com.laurier.events;
++
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.charset.StandardCharsets;
++import java.time.Duration;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Thin client for the Anthropic Messages API (the "generation" side of the
++ * RAG pipeline behind /api/chat). Takes a student's question plus the
++ * events ChatService retrieved and asks Claude to answer using only that
++ * context, so answers stay grounded in real events instead of the model
++ * guessing.
++ */
++public final class ClaudeClient {
++
++    private static final String ENDPOINT = "https://api.anthropic.com/v1/messages";
++    private static final String MODEL = "claude-haiku-4-5-20251001";
++    private static final String API_VERSION = "2023-06-01";
++
++    private final HttpClient http = HttpClient.newBuilder()
++            .connectTimeout(Duration.ofSeconds(10))
++            .build();
++    private final String apiKey;
++
++    public ClaudeClient(String apiKey) {
++        this.apiKey = apiKey;
++    }
++
++    public boolean isConfigured() {
++        return apiKey != null && !apiKey.isBlank();
++    }
++
++    public String ask(String question, String eventContext) throws Exception {
++        String system = "You are the event assistant for the Laurier Campus Events App. "
++                + "Answer the student's question using ONLY the events listed below. "
++                + "Keep answers short (2-4 sentences), mention specific dates, locations, "
++                + "or RSVP deadlines when relevant, and if none of the events answer the "
++                + "question, say so plainly instead of guessing.\n\nEvents:\n" + eventContext;
++
++        Map<String, Object> message = new LinkedHashMap<>();
++        message.put("role", "user");
++        message.put("content", question);
++
++        Map<String, Object> body = new LinkedHashMap<>();
++        body.put("model", MODEL);
++        body.put("max_tokens", 400);
++        body.put("system", system);
++        body.put("messages", List.of(message));
++
++        HttpRequest req = HttpRequest.newBuilder(URI.create(ENDPOINT))
++                .header("Content-Type", "application/json")
++                .header("x-api-key", apiKey)
++                .header("anthropic-version", API_VERSION)
++                .timeout(Duration.ofSeconds(30))
++                .POST(HttpRequest.BodyPublishers.ofString(Json.write(body), StandardCharsets.UTF_8))
++                .build();
++
++        HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
++        if (res.statusCode() / 100 != 2) {
++            throw new RuntimeException("Claude API request failed: " + res.statusCode() + " " + res.body());
++        }
++
++        Map<String, Object> parsed = Json.readObject(res.body());
++        @SuppressWarnings("unchecked")
++        List<Map<String, Object>> content = (List<Map<String, Object>>) parsed.get("content");
++        StringBuilder sb = new StringBuilder();
++        for (Map<String, Object> block : content) {
++            if ("text".equals(block.get("type"))) {
++                sb.append((String) block.get("text"));
++            }
++        }
++        return sb.toString().trim();
++    }
++}
+diff --git a/backend/src/com/laurier/events/Db.java b/backend/src/com/laurier/events/Db.java
+index 790a742..8598072 100644
+--- a/backend/src/com/laurier/events/Db.java
++++ b/backend/src/com/laurier/events/Db.java
+@@ -61,6 +61,16 @@ public final class Db {
+                     PRIMARY KEY (student_id, event_id)
+                 )
+             """);
++            // Caches one embedding vector per event for the /api/chat RAG pipeline.
++            // text_hash lets ChatService detect a stale embedding (event edited)
++            // and recompute it lazily instead of eagerly invalidating on every write.
++            st.execute("""
++                CREATE TABLE IF NOT EXISTS event_embeddings (
++                    event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
++                    text_hash TEXT NOT NULL,
++                    embedding TEXT NOT NULL
++                )
++            """);
+         }
+     }
+ 
+diff --git a/backend/src/com/laurier/events/EmbeddingClient.java b/backend/src/com/laurier/events/EmbeddingClient.java
+new file mode 100644
+index 0000000..3bacef4
+--- /dev/null
++++ b/backend/src/com/laurier/events/EmbeddingClient.java
+@@ -0,0 +1,80 @@
++package com.laurier.events;
++
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.charset.StandardCharsets;
++import java.time.Duration;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Thin client for Voyage AI's embeddings endpoint (the "retrieval" side of
++ * the RAG pipeline behind /api/chat). Turns event text and student questions
++ * into vectors so ChatService can rank events by semantic similarity instead
++ * of plain keyword matching.
++ *
++ * Uses only java.net.http.HttpClient (built into the JDK since 11), so this
++ * doesn't add a dependency beyond the existing SQLite driver jar.
++ */
++public final class EmbeddingClient {
++
++    private static final String ENDPOINT = "https://api.voyageai.com/v1/embeddings";
++    private static final String MODEL = "voyage-3.5-lite";
++
++    private final HttpClient http = HttpClient.newBuilder()
++            .connectTimeout(Duration.ofSeconds(10))
++            .build();
++    private final String apiKey;
++
++    public EmbeddingClient(String apiKey) {
++        this.apiKey = apiKey;
++    }
++
++    public boolean isConfigured() {
++        return apiKey != null && !apiKey.isBlank();
++    }
++
++    /**
++     * @param inputType "query" when embedding a student's question, "document"
++     *                  when embedding stored event text. Voyage optimizes the
++     *                  vectors differently for each side of a retrieval task.
++     */
++    public List<double[]> embed(List<String> texts, String inputType) throws Exception {
++        Map<String, Object> body = new LinkedHashMap<>();
++        body.put("input", texts);
++        body.put("model", MODEL);
++        body.put("input_type", inputType);
++
++        HttpRequest req = HttpRequest.newBuilder(URI.create(ENDPOINT))
++                .header("Content-Type", "application/json")
++                .header("Authorization", "Bearer " + apiKey)
++                .timeout(Duration.ofSeconds(20))
++                .POST(HttpRequest.BodyPublishers.ofString(Json.write(body), StandardCharsets.UTF_8))
++                .build();
++
++        HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
++        if (res.statusCode() / 100 != 2) {
++            throw new RuntimeException("Voyage AI embeddings request failed: " + res.statusCode() + " " + res.body());
++        }
++
++        Map<String, Object> parsed = Json.readObject(res.body());
++        @SuppressWarnings("unchecked")
++        List<Map<String, Object>> data = (List<Map<String, Object>>) parsed.get("data");
++
++        List<double[]> out = new ArrayList<>(Collections.nCopies(data.size(), null));
++        for (Map<String, Object> item : data) {
++            int index = ((Number) item.get("index")).intValue();
++            @SuppressWarnings("unchecked")
++            List<Object> raw = (List<Object>) item.get("embedding");
++            double[] vec = new double[raw.size()];
++            for (int i = 0; i < raw.size(); i++) vec[i] = ((Number) raw.get(i)).doubleValue();
++            out.set(index, vec);
++        }
++        return out;
++    }
++}
+diff --git a/backend/src/com/laurier/events/Main.java b/backend/src/com/laurier/events/Main.java
+index 1718fba..976e6bd 100644
+--- a/backend/src/com/laurier/events/Main.java
++++ b/backend/src/com/laurier/events/Main.java
+@@ -30,10 +30,15 @@ public final class Main {
+         EventRepository events = new EventRepository(db);
+         StudentRepository students = new StudentRepository(db);
+ 
++        EmbeddingClient embeddingClient = new EmbeddingClient(System.getenv("VOYAGE_API_KEY"));
++        ClaudeClient claudeClient = new ClaudeClient(System.getenv("ANTHROPIC_API_KEY"));
++        ChatService chat = new ChatService(db, events, embeddingClient, claudeClient);
++
+         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+ 
+         server.createContext("/api/events", ex -> handle(ex, () -> handleEvents(ex, events, students)));
+         server.createContext("/api/students", ex -> handle(ex, () -> handleStudents(ex, events, students)));
++        server.createContext("/api/chat", ex -> handle(ex, () -> handleChat(ex, chat)));
+         server.createContext("/", ex -> handle(ex, () -> serveStatic(ex, webRoot)));
+ 
+         server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(8));
+@@ -113,6 +118,22 @@ public final class Main {
+         sendJson(ex, 405, Map.of("error", "Method not allowed"));
+     }
+ 
++    // ---------- /api/chat ----------
++
++    private static void handleChat(HttpExchange ex, ChatService chat) throws Exception {
++        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
++            sendJson(ex, 405, Map.of("error", "Method not allowed"));
++            return;
++        }
++        Map<String, Object> body = Json.readObject(readBody(ex));
++        String message = body.get("message") == null ? null : String.valueOf(body.get("message"));
++        try {
++            sendJson(ex, 200, chat.answer(message));
++        } catch (IllegalStateException e) {
++            sendJson(ex, 503, Map.of("error", e.getMessage()));
++        }
++    }
++
+     // ---------- /api/students/{key}/tracked[/{eventId}] ----------
+ 
+     private static void handleStudents(HttpExchange ex, EventRepository events, StudentRepository students) throws Exception {
+diff --git a/backend/web/css/style.css b/backend/web/css/style.css
+index eab1849..8acb4b8 100644
+--- a/backend/web/css/style.css
++++ b/backend/web/css/style.css
+@@ -259,3 +259,118 @@ input[type="search"], input[type="text"], input[type="datetime-local"], select,
+ @media (max-width: 520px) {
+   .header-inner { flex-direction: column; align-items: flex-start; }
+ }
++
++/* ---------- Chat widget (RAG-backed event assistant) ---------- */
++
++.chat-widget {
++  position: fixed;
++  right: 20px;
++  bottom: 20px;
++  z-index: 40;
++  display: flex;
++  flex-direction: column;
++  align-items: flex-end;
++  gap: 10px;
++}
++
++.chat-toggle {
++  background: var(--purple-600);
++  color: white;
++  border: none;
++  padding: 12px 18px;
++  border-radius: 999px;
++  cursor: pointer;
++  font-weight: 700;
++  font-size: 14px;
++  box-shadow: 0 4px 14px rgba(44, 10, 77, 0.28);
++}
++.chat-toggle:hover { background: var(--purple-700); }
++
++.chat-panel {
++  width: min(340px, calc(100vw - 40px));
++  height: 440px;
++  background: var(--card);
++  border: 1px solid var(--border);
++  border-radius: var(--radius);
++  box-shadow: 0 12px 32px rgba(44, 10, 77, 0.22);
++  display: flex;
++  flex-direction: column;
++  overflow: hidden;
++}
++
++.chat-header {
++  background: linear-gradient(135deg, var(--purple-900), var(--purple-600));
++  color: white;
++  font-weight: 700;
++  font-size: 14px;
++  padding: 12px 16px;
++}
++
++.chat-messages {
++  flex: 1;
++  overflow-y: auto;
++  padding: 14px;
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  background: var(--paper);
++}
++
++.chat-bubble {
++  max-width: 86%;
++  padding: 9px 12px;
++  border-radius: 12px;
++  font-size: 13.5px;
++  line-height: 1.4;
++}
++
++.chat-answer-text { margin: 0; }
++
++.chat-assistant {
++  align-self: flex-start;
++  background: white;
++  border: 1px solid var(--border);
++  color: var(--ink);
++}
++
++.chat-user {
++  align-self: flex-end;
++  background: var(--purple-600);
++  color: white;
++}
++
++.chat-sources {
++  margin-top: 8px;
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px;
++}
++
++.chat-source-chip {
++  border: 1px solid var(--gold-500);
++  background: #fff8e6;
++  color: var(--purple-700);
++  padding: 4px 9px;
++  border-radius: 999px;
++  font-size: 12px;
++  font-weight: 600;
++  cursor: pointer;
++}
++.chat-source-chip:hover { background: var(--gold-500); color: var(--purple-900); }
++
++.chat-form {
++  display: flex;
++  gap: 8px;
++  padding: 12px;
++  border-top: 1px solid var(--border);
++  background: white;
++}
++
++.chat-form input[type="text"] {
++  flex: 1;
++}
++
++@media (max-width: 520px) {
++  .chat-widget { right: 12px; bottom: 12px; }
++  .chat-panel { height: 60vh; }
++}
+diff --git a/backend/web/index.html b/backend/web/index.html
+index fe62da9..9e90819 100644
+--- a/backend/web/index.html
++++ b/backend/web/index.html
+@@ -87,6 +87,22 @@
+     <p>Built for Wilfrid Laurier students &middot; Java + SQLite backend, TypeScript frontend</p>
+   </footer>
+ 
++  <div id="chat-widget" class="chat-widget">
++    <button id="chat-toggle" type="button" class="chat-toggle">💬 Ask about events</button>
++    <div id="chat-panel" class="chat-panel hidden">
++      <div class="chat-header">Ask about events</div>
++      <div id="chat-messages" class="chat-messages">
++        <div class="chat-bubble chat-assistant">
++          Hi! Try asking something like "any free food events this week?" or "when's the career fair RSVP deadline?"
++        </div>
++      </div>
++      <form id="chat-form" class="chat-form">
++        <input id="chat-input" type="text" placeholder="Ask a question..." aria-label="Ask about events" autocomplete="off" />
++        <button type="submit" class="primary-btn">Send</button>
++      </form>
++    </div>
++  </div>
++
+   <script type="module" src="/js/main.js"></script>
+ </body>
+ </html>
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+index a4e73b3..9992e9c 100644
+--- a/frontend/src/api.ts
++++ b/frontend/src/api.ts
+@@ -1,4 +1,4 @@
+-import { CampusEvent, NewEventInput } from "./types.js";
++import { CampusEvent, ChatReply, NewEventInput } from "./types.js";
+ import { API_BASE } from "./config.js";
+ 
+ const STUDENT_KEY_STORAGE = "laurier-events:student-key";
+@@ -59,4 +59,11 @@ export const api = {
+       method: "DELETE",
+     });
+   },
++
++  chat(message: string): Promise<ChatReply> {
++    return request<ChatReply>("/api/chat", {
++      method: "POST",
++      body: JSON.stringify({ message }),
++    });
++  },
+ };
+diff --git a/frontend/src/chat.ts b/frontend/src/chat.ts
+new file mode 100644
+index 0000000..b5049ee
+--- /dev/null
++++ b/frontend/src/chat.ts
+@@ -0,0 +1,102 @@
++import { api } from "./api.js";
++import { ChatReply } from "./types.js";
++
++type Role = "user" | "assistant";
++
++interface ChatEls {
++  toggle: HTMLButtonElement;
++  panel: HTMLDivElement;
++  messages: HTMLDivElement;
++  form: HTMLFormElement;
++  input: HTMLInputElement;
++}
++
++/**
++ * Wires up the "Ask about events" widget. Calls the RAG endpoint at
++ * /api/chat and renders the events it cites as clickable chips; clicking one
++ * hands its id to onFocusEvent so main.ts can jump the existing search/filter
++ * state straight to it.
++ */
++export function initChat(onFocusEvent: (eventId: number) => void): void {
++  const els: ChatEls = {
++    toggle: document.getElementById("chat-toggle") as HTMLButtonElement,
++    panel: document.getElementById("chat-panel") as HTMLDivElement,
++    messages: document.getElementById("chat-messages") as HTMLDivElement,
++    form: document.getElementById("chat-form") as HTMLFormElement,
++    input: document.getElementById("chat-input") as HTMLInputElement,
++  };
++
++  if (!els.toggle || !els.panel || !els.messages || !els.form || !els.input) return;
++
++  els.toggle.addEventListener("click", () => {
++    els.panel.classList.toggle("hidden");
++    if (!els.panel.classList.contains("hidden")) els.input.focus();
++  });
++
++  els.form.addEventListener("submit", (e) => {
++    e.preventDefault();
++    void onSubmit(els, onFocusEvent);
++  });
++}
++
++async function onSubmit(els: ChatEls, onFocusEvent: (eventId: number) => void): Promise<void> {
++  const question = els.input.value.trim();
++  if (!question) return;
++  els.input.value = "";
++  els.input.disabled = true;
++
++  appendMessage(els.messages, "user", question);
++  const pending = appendMessage(els.messages, "assistant", "Thinking...");
++
++  try {
++    const reply = await api.chat(question);
++    pending.remove();
++    appendAnswer(els.messages, reply, onFocusEvent);
++  } catch (err) {
++    pending.remove();
++    appendMessage(els.messages, "assistant", err instanceof Error ? err.message : "Something went wrong.");
++  } finally {
++    els.input.disabled = false;
++    els.input.focus();
++  }
++}
++
++function appendMessage(container: HTMLDivElement, role: Role, text: string): HTMLDivElement {
++  const bubble = document.createElement("div");
++  bubble.className = `chat-bubble chat-${role}`;
++  bubble.textContent = text;
++  container.appendChild(bubble);
++  container.scrollTop = container.scrollHeight;
++  return bubble;
++}
++
++function appendAnswer(
++  container: HTMLDivElement,
++  reply: ChatReply,
++  onFocusEvent: (eventId: number) => void
++): void {
++  const bubble = document.createElement("div");
++  bubble.className = "chat-bubble chat-assistant";
++
++  const text = document.createElement("p");
++  text.className = "chat-answer-text";
++  text.textContent = reply.answer;
++  bubble.appendChild(text);
++
++  if (reply.events.length > 0) {
++    const list = document.createElement("div");
++    list.className = "chat-sources";
++    for (const ev of reply.events) {
++      const chip = document.createElement("button");
++      chip.type = "button";
++      chip.className = "chat-source-chip";
++      chip.textContent = ev.title;
++      chip.addEventListener("click", () => onFocusEvent(ev.id));
++      list.appendChild(chip);
++    }
++    bubble.appendChild(list);
++  }
++
++  container.appendChild(bubble);
++  container.scrollTop = container.scrollHeight;
++}
+diff --git a/frontend/src/main.ts b/frontend/src/main.ts
+index 487daed..9d34a94 100644
+--- a/frontend/src/main.ts
++++ b/frontend/src/main.ts
+@@ -1,6 +1,7 @@
+ import { api } from "./api.js";
+ import { CampusEvent, CATEGORIES, NewEventInput } from "./types.js";
+ import { countdown, formatDateTime, isUrgent } from "./time.js";
++import { initChat } from "./chat.js";
+ 
+ const state: {
+   events: CampusEvent[];
+@@ -65,10 +66,25 @@ function init(): void {
+ 
+   els.addForm.addEventListener("submit", onCreateEvent);
+ 
++  initChat(onChatFocusEvent);
++
+   refresh();
+   window.setInterval(render, 60_000); // keep countdowns fresh
+ }
+ 
++// Jumps the existing search/filter state to an event the chatbot cited,
++// reusing the normal browsing pipeline instead of a separate rendering path.
++function onChatFocusEvent(eventId: number): void {
++  const event = state.events.find((e) => e.id === eventId);
++  if (!event) return;
++  state.search = event.title;
++  state.category = "All";
++  els.search.value = event.title;
++  els.category.value = "All";
++  refresh();
++  els.list.scrollIntoView({ behavior: "smooth", block: "start" });
++}
++
+ async function refresh(): Promise<void> {
+   try {
+     setStatus("Loading events...");
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+index 0336109..9d180ed 100644
+--- a/frontend/src/types.ts
++++ b/frontend/src/types.ts
+@@ -24,6 +24,16 @@ export interface NewEventInput {
+   rsvpDeadline: string;
+ }
+ 
++export interface ChatSourceEvent {
++  id: number;
++  title: string;
++}
++
++export interface ChatReply {
++  answer: string;
++  events: ChatSourceEvent[];
++}
++
+ export const CATEGORIES = [
+   "Orientation",
+   "Academic",
+diff --git a/render.yaml b/render.yaml
+index 4f1d26f..2e6784a 100644
+--- a/render.yaml
++++ b/render.yaml
+@@ -10,3 +10,7 @@ services:
+         value: data/events.db
+       - key: WEB_ROOT
+         value: web
++      - key: VOYAGE_API_KEY
++        sync: false
++      - key: ANTHROPIC_API_KEY
++        sync: false
