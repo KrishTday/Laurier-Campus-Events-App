@@ -87,6 +87,22 @@
     <p>Built for Wilfrid Laurier students &middot; Java + SQLite backend, TypeScript frontend</p>
   </footer>
 
+  <div id="chat-widget" class="chat-widget">
+    <button id="chat-toggle" type="button" class="chat-toggle">💬 Ask about events</button>
+    <div id="chat-panel" class="chat-panel hidden">
+      <div class="chat-header">Ask about events</div>
+      <div id="chat-messages" class="chat-messages">
+        <div class="chat-bubble chat-assistant">
+          Hi! Try asking something like "any free food events this week?" or "when's the career fair RSVP deadline?"
+        </div>
+      </div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" type="text" placeholder="Ask a question..." aria-label="Ask about events" autocomplete="off" />
+        <button type="submit" class="primary-btn">Send</button>
+      </form>
+    </div>
+  </div>
+
   <script type="module" src="/js/main.js"></script>
 </body>
 </html>

@@ -61,6 +61,16 @@ public final class Db {
                     PRIMARY KEY (student_id, event_id)
                 )
             """);
+            // Caches one embedding vector per event for the /api/chat RAG pipeline.
+            // text_hash lets ChatService detect a stale embedding (event edited)
+            // and recompute it lazily instead of eagerly invalidating on every write.
+            st.execute("""
+                CREATE TABLE IF NOT EXISTS event_embeddings (
+                    event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+                    text_hash TEXT NOT NULL,
+                    embedding TEXT NOT NULL
+                )
+            """);
         }
     }
 

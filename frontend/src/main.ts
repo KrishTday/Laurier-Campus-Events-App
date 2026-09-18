@@ -1,6 +1,7 @@
 import { api } from "./api.js";
 import { CampusEvent, CATEGORIES, NewEventInput } from "./types.js";
 import { countdown, formatDateTime, isUrgent } from "./time.js";
+import { initChat } from "./chat.js";
 
 const state: {
   events: CampusEvent[];
@@ -65,8 +66,23 @@ function init(): void {
 
   els.addForm.addEventListener("submit", onCreateEvent);
 
+  initChat(onChatFocusEvent);
+
   refresh();
   window.setInterval(render, 60_000); // keep countdowns fresh
+}
+
+// Jumps the existing search/filter state to an event the chatbot cited,
+// reusing the normal browsing pipeline instead of a separate rendering path.
+function onChatFocusEvent(eventId: number): void {
+  const event = state.events.find((e) => e.id === eventId);
+  if (!event) return;
+  state.search = event.title;
+  state.category = "All";
+  els.search.value = event.title;
+  els.category.value = "All";
+  refresh();
+  els.list.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function refresh(): Promise<void> {

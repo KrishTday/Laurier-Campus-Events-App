@@ -30,10 +30,15 @@ public final class Main {
         EventRepository events = new EventRepository(db);
         StudentRepository students = new StudentRepository(db);
 
+        EmbeddingClient embeddingClient = new EmbeddingClient(System.getenv("VOYAGE_API_KEY"));
+        ClaudeClient claudeClient = new ClaudeClient(System.getenv("ANTHROPIC_API_KEY"));
+        ChatService chat = new ChatService(db, events, embeddingClient, claudeClient);
+
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
         server.createContext("/api/events", ex -> handle(ex, () -> handleEvents(ex, events, students)));
         server.createContext("/api/students", ex -> handle(ex, () -> handleStudents(ex, events, students)));
+        server.createContext("/api/chat", ex -> handle(ex, () -> handleChat(ex, chat)));
         server.createContext("/", ex -> handle(ex, () -> serveStatic(ex, webRoot)));
 
         server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(8));
@@ -111,6 +116,22 @@ public final class Main {
             }
         }
         sendJson(ex, 405, Map.of("error", "Method not allowed"));
+    }
+
+    // ---------- /api/chat ----------
+
+    private static void handleChat(HttpExchange ex, ChatService chat) throws Exception {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            sendJson(ex, 405, Map.of("error", "Method not allowed"));
+            return;
+        }
+        Map<String, Object> body = Json.readObject(readBody(ex));
+        String message = body.get("message") == null ? null : String.valueOf(body.get("message"));
+        try {
+            sendJson(ex, 200, chat.answer(message));
+        } catch (IllegalStateException e) {
+            sendJson(ex, 503, Map.of("error", e.getMessage()));
+        }
     }
 
     // ---------- /api/students/{key}/tracked[/{eventId}] ----------

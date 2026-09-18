@@ -10,3 +10,7 @@ services:
         value: data/events.db
       - key: WEB_ROOT
         value: web
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

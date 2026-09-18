@@ -1,4 +1,4 @@
-import { CampusEvent, NewEventInput } from "./types.js";
+import { CampusEvent, ChatReply, NewEventInput } from "./types.js";
 import { API_BASE } from "./config.js";
 
 const STUDENT_KEY_STORAGE = "laurier-events:student-key";
@@ -57,6 +57,13 @@ export const api = {
   untrack(eventId: number): Promise<{ tracked: boolean }> {
     return request(`/api/students/${encodeURIComponent(getStudentKey())}/tracked/${eventId}`, {
       method: "DELETE",
+    });
+  },
+
+  chat(message: string): Promise<ChatReply> {
+    return request<ChatReply>("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ message }),
     });
   },
 };

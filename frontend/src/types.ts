@@ -24,6 +24,16 @@ export interface NewEventInput {
   rsvpDeadline: string;
 }
 
+export interface ChatSourceEvent {
+  id: number;
+  title: string;
+}
+
+export interface ChatReply {
+  answer: string;
+  events: ChatSourceEvent[];
+}
+
 export const CATEGORIES = [
   "Orientation",
   "Academic",
