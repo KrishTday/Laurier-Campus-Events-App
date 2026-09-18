@@ -14,8 +14,7 @@ https://github.com/user-attachments/assets/360ba211-67a5-46cd-aade-742aa5d86c61
 - CSS
 - HTML
 - Docker
-- Render (backend hosting)
-- Vercel (frontend hosting)
+- Render (hosting)
 - Voyage AI (embeddings) + Claude API (generation) for the RAG chat feature
 
 ## 🎉 Features
@@ -32,13 +31,13 @@ Here's what you can do with the Laurier Campus Events App:
 
 I built the backend in plain Java using the JDK's built-in `HttpServer` instead of a framework, so the whole backend only needed the JDK plus a single SQLite JDBC driver jar. I wrote a small hand-rolled JSON reader and writer to keep dependencies minimal, then set up SQLite as the database so the app had no external database service to manage.
 
-On the frontend, I used TypeScript compiled straight to browser JavaScript with no bundler and no client-side framework, updating the DOM directly from `main.ts`. I built the category filters and search first, then layered in the RSVP countdown logic and the red 48-hour warning state. Once the core browsing experience worked, I added per-browser event tracking using a random id stored in `localStorage`, and built out an organizer mode that hits the same REST API as the rest of the app. For deployment, I containerized the backend with Docker for Render and configured the frontend to deploy separately on Vercel, pointed at the Render backend's URL.
+On the frontend, I used TypeScript compiled straight to browser JavaScript with no bundler and no client-side framework, updating the DOM directly from `main.ts`. I built the category filters and search first, then layered in the RSVP countdown logic and the red 48-hour warning state. Once the core browsing experience worked, I added per-browser event tracking using a random id stored in `localStorage`, and built out an organizer mode that hits the same REST API as the rest of the app. For deployment, I containerized the whole app with Docker and deployed it to Render.
 
 ## 📚 What I Learned
 
 This project taught me a lot about building a backend without leaning on a framework. Working directly with Java's `HttpServer` and hand-rolling JSON parsing gave me a much clearer picture of what frameworks normally abstract away, from routing requests to serializing responses.
 
-I also learned how far you can get on the frontend without a bundler or framework, and where that approach starts to show its limits. Building tracking without user accounts pushed me to think through trade-offs around using `localStorage` as a lightweight identity, and setting up two separate deployments (Render for the backend, Vercel for the frontend) taught me more about coordinating environments and config across services than a single-host deployment would have.
+I also learned how far you can get on the frontend without a bundler or framework, and where that approach starts to show its limits. Building tracking without user accounts pushed me to think through trade-offs around using `localStorage` as a lightweight identity, and containerizing and deploying the app to Render taught me more about production environments and config than working locally ever did.
 
 ## 🏃 Running the Project
 
@@ -57,17 +56,14 @@ To run the project in your local environment, follow these steps:
    ```
 4. Open `http://localhost:8080` in your browser to view the app. The database seeds itself with sample Laurier events on first run.
 
-## 🤖 Chat feature setup
+## 🤖 How the chat feature works
 
-The "Ask about events" widget needs two API keys set as environment variables on the backend. Without them, the rest of the app works normally and the chat widget returns a friendly "not configured" message instead of erroring.
+The "Ask about events" widget is powered by a small RAG (retrieval-augmented generation) pipeline running entirely on the backend:
 
-1. Get a Voyage AI key at [voyageai.com](https://www.voyageai.com) (embeddings; free tier available).
-2. Get an Anthropic key at [console.anthropic.com](https://console.anthropic.com) (Claude API; used to generate answers).
-3. Set them before running locally:
-   ```
-   export VOYAGE_API_KEY=your_voyage_key
-   export ANTHROPIC_API_KEY=your_anthropic_key
-   ```
-4. On Render, add the same two keys in the service's Environment tab (they're already declared as secrets in `render.yaml`, so Render will prompt for them on deploy).
+1. **Embedding events**: Whenever event data changes, each event's text (title, description, location, etc.) is sent to Voyage AI to generate a vector embedding, which is cached in SQLite so it doesn't need to be recomputed on every request.
+2. **Embedding the question**: When a student asks something in the chat widget, their question is embedded the same way using Voyage AI.
+3. **Retrieval**: The question's embedding is compared against every cached event embedding using cosine similarity, and the closest-matching events are pulled out as the most relevant context.
+4. **Generation**: Those matched events are handed to the Claude API as grounding context, along with the student's question, so Claude answers using real event data instead of guessing.
+5. **UI**: The matched events also show up as clickable chips under the chat response, letting students jump straight to them in the main list.
 
-Never commit these keys to the repo — they're read from the environment only.
+The deployed app already has the required Voyage AI and Claude API keys configured on the backend, so students using the live site don't need to do anything to use the chat feature. If the backend is ever run somewhere without those keys set, the rest of the app works normally and the chat widget just returns a friendly "not configured" message instead of erroring.
