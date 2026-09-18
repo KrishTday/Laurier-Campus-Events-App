@@ -2,7 +2,7 @@
 
 A full-stack events tracker for Wilfrid Laurier students. Surfaces campus events and RSVP deadlines in one place instead of scattered club emails. Students browse events by category or search, see how far off an RSVP deadline is at a glance, and track the ones they care about, with no account required.
 
-<img width="1050" height="1079" alt="Image" src="https://github.com/user-attachments/assets/e61d579b-4187-4141-9c2c-f38a71ae29b3" />
+<img width="1902" height="1079" alt="Image" src="https://github.com/user-attachments/assets/ad3a6d4d-0fe6-4976-8c8a-70f4d294b3d3" />
 
 ## 🛠️ Technologies
 
