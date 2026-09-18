@@ -4,6 +4,8 @@ A full-stack events tracker for Wilfrid Laurier students. Surfaces campus events
 
 <img width="1902" height="1079" alt="Image" src="https://github.com/user-attachments/assets/ad3a6d4d-0fe6-4976-8c8a-70f4d294b3d3" />
 
+https://github.com/user-attachments/assets/360ba211-67a5-46cd-aade-742aa5d86c61
+
 ## 🛠️ Technologies
 
 - Java (JDK's built-in `HttpServer`, no framework)
@@ -69,7 +71,3 @@ The "Ask about events" widget needs two API keys set as environment variables on
 4. On Render, add the same two keys in the service's Environment tab (they're already declared as secrets in `render.yaml`, so Render will prompt for them on deploy).
 
 Never commit these keys to the repo — they're read from the environment only.
-
-[## 🎥 Video](https://github.com/user-attachments/assets/360ba211-67a5-46cd-aade-742aa5d86c61)
-
-https://github.com/user-attachments/assets/0ecb6068-598e-4e40-a5e8-b4bd082ecbf7
