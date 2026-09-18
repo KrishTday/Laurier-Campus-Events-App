@@ -70,6 +70,6 @@ The "Ask about events" widget needs two API keys set as environment variables on
 
 Never commit these keys to the repo — they're read from the environment only.
 
-## 🎥 Video
+[## 🎥 Video](https://github.com/user-attachments/assets/360ba211-67a5-46cd-aade-742aa5d86c61)
 
 https://github.com/user-attachments/assets/0ecb6068-598e-4e40-a5e8-b4bd082ecbf7
